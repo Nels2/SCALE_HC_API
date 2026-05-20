@@ -1,14 +1,12 @@
 # Scale Computing Platform REST API Examples
 
-This repository contains several example scripts for running API queries against a HyperCore cluster or Fleet Manager.
+This repository contains several example scripts for running API queries against a HyperCore cluster.
 
 These scripts are only examples and demonstrate common use cases with the APIs.  
 
 Refer to this repository's tags for examples tied to a specific Scale release.
 
 ## Full swagger documentation for the APIs
-
-Fleet Manager API: https://api.scalecomputing.com/api/v2
 
 HyperCore API: http://[Your_Clustered_Node_IP}/rest/v1/docs/
 
