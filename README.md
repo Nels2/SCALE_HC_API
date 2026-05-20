@@ -1,19 +1,26 @@
-# Scale Computing Platform REST API Examples
+# Scale Computing System REST API Examples - Task Specific
 
-This repository contains several example scripts for running API queries against a HyperCore cluster.
+This repository contains scripts for running task-specific API queries against a Scale system.
 
-These scripts are only examples and demonstrate common use cases with the APIs.  
+These scripts are only examples and demonstrate common use cases with the API.  
+Refer to the API docs on a scale system for a detailed guide on available calls.
 
-Refer to this repository's tags for examples tied to a specific Scale release.
 
-## Full swagger documentation for the APIs
+### SnapshotReport.ps1
 
-HyperCore API: http://[Your_Clustered_Node_IP}/rest/v1/docs/
+Returns the latest replication snapshot that falls outside of a defined age timeframe.
+Includes optional arguments to retrieve additional information about snapshots, schedules,
+and remote cluster connections.
 
-A link to the HyperCore API documentation is also available in the Support tab of the Control Panel
-![image](https://github.com/user-attachments/assets/107d6c07-5a70-4749-b6f6-8c4780982ba4)
 
-Other automation tools that utilize these apis include:
+### checkAffinity.ps1
 
-Scale Computing Ansible Collection for HyperCore - see https://github.com/ScaleComputing/HyperCoreAnsibleCollection
-Scale Computing Terraform Provider for HyperCore - see https://github.com/ScaleComputing/terraform-provider-hypercore
+Provides the LAN IP addresses and uuid values for each node in the target cluster for quick
+reference. Also provides each VM, the present node location of the VM, and the preferred 
+and backup affinity assignments.
+
+### SetTag.ps1
+
+Sets the VM tag value using a VM name string with an optional ability to restart the VM.
+Useful for applying any tag, but especially for applying a GPU tag and restarting the VM
+to enable the vGPU.
