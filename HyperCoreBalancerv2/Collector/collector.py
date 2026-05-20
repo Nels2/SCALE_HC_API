@@ -6,6 +6,7 @@ from urllib3.exceptions import InsecureRequestWarning
 from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import SYNCHRONOUS
 import config_db
+import scale_session
 
 # Configurables — stay in .env, require restart to change
 SC_HOST = os.getenv('SC_HOST')
@@ -21,36 +22,46 @@ INFLUX_BUCKET = os.getenv('INFLUX_BUCKET')
 
 # Tunables are seeded on startup and re-read from config_db each loop iteration
 
+def api_base():
+    """Return normalized HyperCore REST API base URL."""
+    host = SC_HOST.rstrip("/")
+    if not host.endswith("/rest/v1"):
+        host = f"{host}/rest/v1"
+    return host
 
-def fetch_data(session, endpoint):
-    res = session.get(f"{SC_HOST}{endpoint}", timeout=15)
+
+def fetch_data(endpoint):
+    """Fetch data from HyperCore using cached session authentication."""
+    res = scale_session.get(f"{api_base()}{endpoint}", timeout=15)
     res.raise_for_status()
     return res.json()
 
 
-def fetch_safe(session, endpoint, default=None):
+def fetch_safe(endpoint, default=None):
     """Fetch with graceful fallback — returns default on failure instead of crashing."""
     try:
-        return fetch_data(session, endpoint)
+        return fetch_data(endpoint)
     except Exception as e:
         print(f"[{time.strftime('%H:%M:%S')}] Warning: Failed to fetch {endpoint}: {e}")
         return default if default is not None else []
 
+def do_login(session=None):
+    """
+    Compatibility wrapper.
 
-def do_login(session):
-    print(f"[{time.strftime('%H:%M:%S')}] Authenticating with HyperCore API...")
-    session.cookies.clear()
-    res = session.post(f"{SC_HOST}/login", json={"username": SC_USER, "password": SC_PASS}, timeout=10)
-    res.raise_for_status()
+    Session auth is now handled by scale_session.py.
+    This function exists only so old call sites do not break.
+    """
+    scale_session.get_headers(force_refresh=True)
+    return True
 
+def do_logout(session=None):
+    """
+    Do not logout automatically.
 
-def do_logout(session):
-    print(f"[{time.strftime('%H:%M:%S')}] Logging out from HyperCore API...")
-    try:
-        session.post(f"{SC_HOST}/logout", timeout=5)
-    except Exception as e:
-        print(f"Logout failed or already disconnected: {e}")
-
+    The cached session should remain usable until SC_SESSION_MAX_AGE_SECONDS expires.
+    """
+    print(f"[{time.strftime('%H:%M:%S')}] Collector exiting. Leaving cached HyperCore session in place.")
 
 def write_with_retry(write_api, bucket, points, max_retries=3, retry_delay=5):
     """Attempts to write points to InfluxDB with retries on transient failures."""
@@ -67,7 +78,7 @@ def write_with_retry(write_api, bucket, points, max_retries=3, retry_delay=5):
                 return False
 
 
-def collect_fast(session, nodes, vms, vm_stats, node_info_map):
+def collect_fast(nodes, vms, vm_stats, node_info_map):
     """Collects high-frequency metrics: node performance, VM performance, drive health, VSD I/O."""
     points = []
 
@@ -253,14 +264,16 @@ def collect_fast(session, nodes, vms, vm_stats, node_info_map):
     return points, vm_info_map
 
 
-def collect_slow(session, node_info_map):
+def collect_slow(node_info_map):
     """Collects low-frequency data: snapshots, replication, cluster info, conditions."""
     points = []
 
     # =========================================================================
     # CLUSTER INFO — version tracking, name
     # =========================================================================
-    cluster = fetch_safe(session, "/Cluster")
+    #cluster = fetch_safe(session, "/Cluster")
+    cluster = fetch_safe("/Cluster")
+
     for c in cluster:
         p = Point("cluster_metrics") \
             .tag("cluster_uuid", c.get('uuid', 'unknown')) \
@@ -271,7 +284,7 @@ def collect_slow(session, node_info_map):
     # =========================================================================
     # SNAPSHOTS — per-VM snapshot tracking
     # =========================================================================
-    snapshots = fetch_safe(session, "/VirDomainSnapshot")
+    snapshots = fetch_safe("/VirDomainSnapshot")
     snap_by_vm = {}
     for snap in snapshots:
         dom_uuid = snap.get('domainUUID', 'unknown')
@@ -294,7 +307,7 @@ def collect_slow(session, node_info_map):
     # =========================================================================
     # REPLICATION — progress tracking
     # =========================================================================
-    replications = fetch_safe(session, "/VirDomainReplication")
+    replications = fetch_safe("/VirDomainReplication")
     for rep in replications:
         progress = rep.get('progress', {})
         p = Point("replication_metrics") \
@@ -310,7 +323,7 @@ def collect_slow(session, node_info_map):
     # =========================================================================
     # CONDITIONS — cluster health alerts
     # =========================================================================
-    conditions = fetch_safe(session, "/Condition")
+    conditions = fetch_safe("/Condition")
     for cond in conditions:
         # Only collect user-visible, active conditions to avoid noise
         if not cond.get('userVisible', False):
@@ -374,13 +387,11 @@ def main():
     # Set retention policy on startup
     set_bucket_retention(influx_client)
 
-    session = requests.Session()
-    session.verify = SC_VERIFY_SSL
-
     try:
-        do_login(session)
+        scale_session.get_headers()
     except Exception as e:
-        print(f"Initial login failed: {e}")
+        print(f"Initial Scale session setup failed: {e}")
+        raise
 
     last_slow_poll = 0
     node_info_map = {}
@@ -395,16 +406,17 @@ def main():
 
             try:
                 # --- Fast poll: performance metrics ---
-                nodes = fetch_data(session, "/Node")
-                vms = fetch_data(session, "/VirDomain")
-                vm_stats = fetch_data(session, "/VirDomainStats")
+                #nodes = fetch_data(session, "/Node")
+                nodes = fetch_data("/Node")
+                vms = fetch_data("/VirDomain")
+                vm_stats = fetch_data("/VirDomainStats")
 
-                fast_points, vm_info_map = collect_fast(session, nodes, vms, vm_stats, node_info_map)
+                fast_points, vm_info_map = collect_fast(nodes, vms, vm_stats, node_info_map)
 
                 # --- Slow poll: inventory & health ---
                 slow_points = []
                 if time.time() - last_slow_poll >= slow_poll_interval:
-                    slow_points = collect_slow(session, node_info_map)
+                    slow_points = collect_slow(node_info_map)
                     last_slow_poll = time.time()
 
                 all_points = fast_points + slow_points
@@ -413,21 +425,14 @@ def main():
                     print(f"[{time.strftime('%H:%M:%S')}] Wrote {len(all_points)} datapoints ({len(fast_points)} fast{slow_note}).")
 
             except requests.exceptions.HTTPError as e:
-                if e.response is not None and e.response.status_code == 401:
-                    print(f"[{time.strftime('%H:%M:%S')}] Session expired (401). Re-authenticating...")
-                    try:
-                        do_login(session)
-                    except Exception as login_err:
-                        print(f"Re-authentication failed: {login_err}")
-                else:
-                    print(f"[{time.strftime('%H:%M:%S')}] HTTP Error: {e}")
+                print(f"[{time.strftime('%H:%M:%S')}] HTTP Error: {e}")
             except Exception as e:
                 print(f"[{time.strftime('%H:%M:%S')}] Unexpected Error: {e}")
 
             time.sleep(poll_interval)
 
     finally:
-        do_logout(session)
+        do_logout()
 
 
 if __name__ == "__main__":

@@ -42,6 +42,7 @@ INFLUX_URL = os.getenv('INFLUX_URL', 'http://influxdb:8086')
 INFLUX_TOKEN = os.getenv('INFLUX_TOKEN', 'super-secret-auth-token')
 INFLUX_ORG = os.getenv('INFLUX_ORG', 'hypercore')
 INFLUX_BUCKET = os.getenv('INFLUX_BUCKET', 'metrics')
+GRAFANA_URL = os.getenv('GRAFANA_URL', '').rstrip('/')
 
 # Fallback stale threshold — live value is read from config_db per request
 STALE_SECONDS = int(os.getenv('SC_DASHBOARD_STALE_SECONDS', 120))
@@ -69,6 +70,8 @@ def require_auth(f):
 
 def get_influx_client():
     return InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
+
+
 
 
 def is_stale(history_list):
@@ -429,6 +432,26 @@ def post_config():
         return jsonify({'ok': True})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/tools/grafana')
+@require_auth
+def get_grafana_tool():
+    """Return Grafana launch information for the dashboard Tools card."""
+    if GRAFANA_URL:
+        return jsonify({
+            'enabled': True,
+            'url': GRAFANA_URL,
+            'status': 'External',
+            'message': 'Grafana is configured externally.'
+        })
+
+    return jsonify({
+        'enabled': False,
+        'url': '',
+        'status': 'Not configured',
+        'message': 'Set GRAFANA_URL in .env to enable this button.'
+    })
 
 
 # =============================================================================

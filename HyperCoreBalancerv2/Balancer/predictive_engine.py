@@ -20,6 +20,11 @@ INFLUX_TOKEN = os.getenv('INFLUX_TOKEN', "super-secret-auth-token")
 INFLUX_ORG = os.getenv('INFLUX_ORG', "hypercore")
 INFLUX_BUCKET = os.getenv('INFLUX_BUCKET', "metrics")
 
+# model config
+MODEL_CACHE_DIR = os.getenv("SC_PREDICTIVE_MODEL_CACHE_DIR", "/models")
+SAVE_FORECASTS = os.getenv("SC_PREDICTIVE_SAVE_FORECASTS", "false").lower() in ("true", "1", "yes")
+
+
 # Tunables are read live from config_db at forecast time (see get_proactive_migrations)
 
 
@@ -49,6 +54,16 @@ def get_proactive_migrations(vms, nodes, forecast_hours=24):
     min_history     = config_db.get('PREDICTIVE_MIN_HISTORY_HOURS') or 336
     lookback_days   = config_db.get('PREDICTIVE_LOOKBACK_DAYS')    or 90
     max_workers     = config_db.get('PREDICTIVE_MAX_WORKERS')      or 8
+    
+    debug_vm_name = os.getenv("SC_PREDICTIVE_DEBUG_VM_NAME", "").strip()
+
+    if debug_vm_name:
+        vms = [
+            vm for vm in vms
+            if vm.get("name") == debug_vm_name
+        ]
+        print(f"[ORACLE] Debug mode: forecasting only VM '{debug_vm_name}'")
+        
     print(f"[ORACLE] Waking up. Forecasting the next {forecast_hours} hours across {len(vms)} VMs "
           f"using up to {max_workers} workers (lookback={lookback_days}d, threshold={threshold}%)...")
     return _run_forecast(vms, nodes, forecast_hours, lookback_days, min_history, max_workers, threshold)
@@ -103,7 +118,18 @@ def _forecast_single_vm(vm, forecast_hours, lookback_days, min_history_hours):
     del records
     last_date = df['ds'].max()
 
-    m = Prophet(daily_seasonality=15, weekly_seasonality=20, yearly_seasonality=False, seasonality_prior_scale=15.0)
+    daily_seasonality = config_db.get('PREDICTIVE_DAILY_SEASONALITY') or 15
+    weekly_seasonality = config_db.get('PREDICTIVE_WEEKLY_SEASONALITY') or 20
+    seasonality_prior_scale = config_db.get('PREDICTIVE_SEASONALITY_PRIOR_SCALE') or 15.0
+    changepoint_prior_scale = config_db.get('PREDICTIVE_CHANGEPOINT_PRIOR_SCALE') or 0.05
+
+    m = Prophet(
+        daily_seasonality=int(daily_seasonality),
+        weekly_seasonality=int(weekly_seasonality),
+        yearly_seasonality=False,
+        seasonality_prior_scale=float(seasonality_prior_scale),
+        changepoint_prior_scale=float(changepoint_prior_scale),
+    )
     m.fit(df)
     del df
 
@@ -112,9 +138,24 @@ def _forecast_single_vm(vm, forecast_hours, lookback_days, min_history_hours):
     del m, future
 
     future_forecast = forecast[forecast['ds'] > last_date]
+
+    if SAVE_FORECASTS:
+        try:
+            os.makedirs(MODEL_CACHE_DIR, exist_ok=True)
+            safe_name = re.sub(r'[^a-zA-Z0-9_.-]', '_', vm_name)
+            forecast_path = os.path.join(
+                MODEL_CACHE_DIR,
+                f"{safe_name}_{vm_uuid}_forecast.csv"
+            )
+            future_forecast.to_csv(forecast_path, index=False)
+            print(f"[ORACLE] Saved forecast for {vm_name} to {forecast_path}")
+        except Exception as e:
+            print(f"[ORACLE] Failed to save forecast for {vm_name}: {e}")
+
     peak_pred = future_forecast.loc[future_forecast['yhat_upper'].idxmax()]
     max_expected_cpu = min(peak_pred['yhat_upper'], 100.0)
     peak_timestamp = peak_pred['ds'].timestamp()
+
     del forecast, future_forecast
 
     return {

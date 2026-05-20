@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY HyperCore_balancer.py .
 COPY predictive_engine.py .
 COPY config_db.py .
+COPY scale_session.py .
 
 # Run the balancer unbuffered so logs show up immediately in Docker
 CMD ["python", "-u", "HyperCore_balancer.py"]

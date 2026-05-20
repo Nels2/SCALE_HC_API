@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Tuple, Any
 from dotenv import load_dotenv
 from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import SYNCHRONOUS
+import scale_session
 
 # Load environment variables
 load_dotenv()
@@ -61,74 +62,88 @@ INFLUX_BUCKET = get_config('INFLUX_BUCKET', "metrics")
 class HyperCoreApiClient:
     def __init__(self, base_url: str, user: str, pw: str, verify: bool):
         self.base_url = base_url.rstrip('/')
+
+        # Allow SC_HOST to be either:
+        #   https://scale-host
+        # or
+        #   https://scale-host/rest/v1
+        if not self.base_url.endswith("/rest/v1"):
+            self.base_url = f"{self.base_url}/rest/v1"
+
         self.user = user
         self.pw = pw
-        self.session = requests.Session()
-        self.session.verify = verify
-        
+        self.verify_ssl = verify
+
         if not verify:
             from urllib3.exceptions import InsecureRequestWarning
             warnings.simplefilter('ignore', InsecureRequestWarning)
 
     def login(self) -> bool:
-        url = f"{self.base_url}/login"
-        payload = {"username": self.user, "password": self.pw}
+        """
+        Compatibility method.
+
+        Actual session handling is done by scale_session.py.
+        This verifies that a cached or fresh session is available.
+        """
         try:
-            self.session.cookies.clear()
-            response = self.session.post(url, json=payload, timeout=10)
-            response.raise_for_status()
+            scale_session.get_headers(force_refresh=False)
             return True
-        except requests.exceptions.RequestException as e:
-            print(f"Login failed: {e}")
+        except Exception as e:
+            print(f"[API] Session setup failed: {e}")
             return False
 
     def close(self):
-        try:
-            self.session.post(f"{self.base_url}/logout", timeout=5)
-        except:
-            pass
-        self.session.close()
+        """
+        Do not logout automatically here.
+
+        The whole point of session caching is to keep the session valid
+        across container restarts until SC_SESSION_MAX_AGE_SECONDS expires.
+        """
+        pass
 
     def fetch(self, endpoint: str) -> Any:
-        response = self.session.get(f"{self.base_url}{endpoint}", timeout=15)
-        if response.status_code == 401:
-            ts = time.strftime("%Y-%m-%d %H:%M:%S")
-            print(f"[{ts}] Session expired (401). Re-authenticating...")
-            if self.login():
-                response = self.session.get(f"{self.base_url}{endpoint}", timeout=15)
-            else:
-                raise requests.exceptions.HTTPError("Re-authentication failed after 401")
-        response.raise_for_status()
-        return response.json()
+        url = f"{self.base_url}{endpoint}"
 
-    def get_nodes(self): return self.fetch("/Node")
-    def get_vms(self): return self.fetch("/VirDomain")
-    def get_vm_stats(self): return self.fetch("/VirDomainStats")
-    
+        try:
+            response = scale_session.get(url, timeout=15)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            print(f"[API] GET failed for {endpoint}: {e}")
+            raise
+
+    def get_nodes(self):
+        return self.fetch("/Node")
+
+    def get_vms(self):
+        return self.fetch("/VirDomain")
+
+    def get_vm_stats(self):
+        return self.fetch("/VirDomainStats")
+
     def get_task_status(self, task_tag: str) -> str:
         try:
             res = self.fetch(f"/TaskTag/{task_tag}")
             return res[0]['state'] if res else "UNKNOWN"
-        except:
+        except Exception:
             return "UNKNOWN"
 
     def migrate(self, vm_uuid: str, target_node: str) -> Dict:
         action = [{
-            "virDomainUUID": vm_uuid, 
-            "actionType": "LIVEMIGRATE", 
+            "virDomainUUID": vm_uuid,
+            "actionType": "LIVEMIGRATE",
             "nodeUUID": target_node
         }]
-        resp = self.session.post(f"{self.base_url}/VirDomain/action", json=action, timeout=15)
-        if resp.status_code == 401:
-            ts = time.strftime("%Y-%m-%d %H:%M:%S")
-            print(f"[{ts}] Session expired (401) during migration. Re-authenticating...")
-            if self.login():
-                resp = self.session.post(f"{self.base_url}/VirDomain/action", json=action, timeout=15)
-            else:
-                raise requests.exceptions.HTTPError("Re-authentication failed during migration")
-        resp.raise_for_status()
-        return resp.json()
 
+        url = f"{self.base_url}/VirDomain/action"
+
+        try:
+            resp = scale_session.post(url, json=action, timeout=15)
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.RequestException as e:
+            print(f"[API] Migration request failed for VM {vm_uuid}: {e}")
+            raise
 # =============================================================================
 # Migration Event Logger (writes structured events to InfluxDB)
 # =============================================================================
